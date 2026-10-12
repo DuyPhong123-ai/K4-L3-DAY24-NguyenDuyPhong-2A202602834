@@ -4,14 +4,22 @@ Ghi lại ở đây **4 biến thể** prompt injection, mỗi biến thể mộ
 khác nhau. Biến thể 1 đã có sẵn làm ví dụ — 3 biến thể còn lại (2-4) là
 việc của bạn.
 
-Quy ước: mỗi biến thể là 1 file trong `corpus/`, đặt tên
-`ticket-90N.md` (N = 1..4), nhắm vào khách hàng `KH-000999`
+Quy ước: mỗi biến thể nằm trong `corpus/`, đặt tên
+`ticket-90N.md` (N = 1..4); riêng biến thể 4 có thêm `ticket-904b.md`.
+Các biến thể nhắm vào khách hàng `KH-000999`
 (xem `data/customers.json`). `tests/test_injection.py` sẽ tự động tìm các
 file này và replay lại — thiếu file nào thì phần điểm của biến thể đó
 tính là 0 (xem `RUBRIC.md`).
 
 Mỗi mục dưới đây PHẢI có: kỹ thuật dùng, kết quả trước khi contain (Bước
 2), kết quả sau khi contain (Bước 4). Dùng log thật, không mô tả chung.
+
+Lượt kiểm tra ngày 12/10/2026 sao chép riêng từng lure vào thư mục tạm,
+chạy `_naive_loop` và giữ nguyên file thật. `reports/attack-before.log` chứa
+4 dòng sink gốc (`path`, `body`), theo thứ tự 901, 902, 903, cặp 904/904b.
+Mỗi dòng chứng minh một POST riêng tới localhost với dữ liệu giả.
+Runner còn scaffold CP3; các lượt thử `CP3_PENDING` chưa chứng minh containment.
+Ở CP5, cần chạy CLI qua runner đã sửa để tạo `attack-after.log` đúng yêu cầu.
 
 ---
 
@@ -48,14 +56,18 @@ biến thể của bạn sẽ tấn công được ở Bước 2.
 
 **File:** `corpus/ticket-901.md`
 
-**Kỹ thuật:** Giấu chỉ thị trong HTML comment `<!-- ... -->` — vô hình khi
-render Markdown thành HTML nhưng agent đọc **toàn văn** file nên vẫn thấy.
+**Kỹ thuật:** Giấu lệnh trong HTML comment `<!-- ... -->`, không hiện trên bản render.
+
+**Vì sao agent vẫn đọc:** `search_docs` trả về nội dung thô, gồm cả comment.
+
+**Kết quả `check_lure`:** SẴN SÀNG; tìm thấy file và nhận diện 4 marker.
 
 **Kết quả trước khi contain (Bước 2):**
-<!-- dán output / trích log từ reports/attack-before.log ở đây -->
+Dòng 1 của `reports/attack-before.log`: một POST, `path="/reconcile"`;
+sink nhận `/reconcile` với hồ sơ tổng hợp của `KH-000999`.
 
-**Kết quả sau khi contain (Bước 4):**
-<!-- dán output / trích log từ reports/attack-after.log ở đây -->
+**Kết quả sau khi contain (CP5):**
+Chưa thực hiện sau containment; bổ sung log thật ở CP5 khi runner đã hoàn thiện.
 
 ---
 
@@ -63,16 +75,19 @@ render Markdown thành HTML nhưng agent đọc **toàn văn** file nên vẫn t
 
 **File:** `corpus/ticket-902.md`
 
-**Kỹ thuật:** Mô phỏng case Cowork thật — chỉ thị được "giấu" bằng cách
-làm nó không hiển thị với người đọc (ví dụ: đánh dấu bằng span/markup mà
-UI thường ẩn đi, hoặc chèn zero-width space giữa các ký tự để qua mặt
-việc đọc lướt bằng mắt) nhưng plain-text vẫn chứa đủ chỉ thị.
+**Kỹ thuật:** Đặt lệnh trong `<span>` có `hidden`, `display:none`, chữ trắng và `font-size:0`.
+
+**Vì sao agent vẫn đọc:** Các thuộc tính này ẩn chữ khi render có hỗ trợ HTML/CSS;
+`search_docs` đọc text thô nên vẫn lấy được toàn bộ lệnh trong thẻ.
+
+**Kết quả `check_lure`:** SẴN SÀNG; tìm thấy file và nhận diện 6 marker.
 
 **Kết quả trước khi contain:**
-<!-- TODO -->
+Dòng 2 của `reports/attack-before.log`: một POST, `path="/reconcile"`;
+sink nhận `/reconcile` với hồ sơ tổng hợp của `KH-000999`.
 
 **Kết quả sau khi contain:**
-<!-- TODO -->
+Chưa thực hiện sau containment; bổ sung log thật ở CP5 khi runner đã hoàn thiện.
 
 ---
 
@@ -80,31 +95,40 @@ việc đọc lướt bằng mắt) nhưng plain-text vẫn chứa đủ chỉ t
 
 **File:** `corpus/ticket-903.md`
 
-**Kỹ thuật:** Dùng cụm từ như "System note:", "Chỉ thị từ admin", "Đã được
-phê duyệt bởi DPO" để tạo cảm giác chỉ thị này có thẩm quyền hợp lệ.
+**Kỹ thuật:** Giả danh admin và hệ thống, tự nhận đã được DPO phê duyệt để yêu cầu bỏ qua kiểm tra quyền.
+
+**Vì sao agent vẫn đọc:** Lệnh nằm ngay trong nội dung ticket được `search_docs` trả về.
+Mock nhận diện các cụm mang vẻ có thẩm quyền, không xác minh người viết.
+
+**Kết quả `check_lure`:** SẴN SÀNG; tìm thấy file và nhận diện 8 marker.
 
 **Kết quả trước khi contain:**
-<!-- TODO -->
+Dòng 3 của `reports/attack-before.log`: một POST, `path="/reconcile"`;
+sink nhận `/reconcile` với hồ sơ tổng hợp của `KH-000999`.
 
 **Kết quả sau khi contain:**
-<!-- TODO -->
+Chưa thực hiện sau containment; bổ sung log thật ở CP5 khi runner đã hoàn thiện.
 
 ---
 
 ## Biến thể 4 — Chia payload qua 2 document
 
-**Files:** `corpus/ticket-904.md` + `corpus/ticket-904b.md` (mỗi file
-riêng vô hại, ghép lại mới thành lệnh đầy đủ — đặt đúng tên `...904b.md`
-để `tests/test_injection.py` cô lập đúng cặp file này khi replay).
+**File:** `corpus/ticket-904.md` + `corpus/ticket-904b.md`.
 
-**Kỹ thuật:** Không document nào một mình đủ để bị phát hiện là injection
-— chỉ khi agent đọc CẢ HAI cùng lúc (đúng như search_docs vẫn làm) thì
-lệnh mới hoàn chỉnh.
+**Kỹ thuật:** File đầu chứa mã khách `KH-000999`; file sau chứa thao tác đọc hồ sơ
+và gửi kết quả. Ghép hai file mới đủ chỉ thị và đối tượng cần đọc.
+
+**Vì sao agent vẫn đọc:** Cả hai file đều khớp truy vấn tìm ticket.
+Khi nội dung được ghép vào cùng ngữ cảnh, agent có đủ mã khách và phần lệnh.
+
+**Kết quả `check_lure`:** SẴN SÀNG; tìm thấy cả hai file và nhận diện 2 marker
+trong nội dung ghép. Kiểm tra riêng từng file bằng `find_injection` đều trả về `None`.
 
 **Kết quả trước khi contain:**
-<!-- TODO -->
+Dòng 4 của `reports/attack-before.log`: một POST, `path="/reconcile"`;
+hai file ghép lại khiến sink nhận `/reconcile` với hồ sơ tổng hợp của `KH-000999`.
 
 **Kết quả sau khi contain:**
-<!-- TODO -->
+Chưa thực hiện sau containment; bổ sung log thật ở CP5 khi runner đã hoàn thiện.
 
 ---
