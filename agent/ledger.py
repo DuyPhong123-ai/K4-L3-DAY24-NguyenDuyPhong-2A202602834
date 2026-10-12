@@ -38,11 +38,46 @@ rồi gọi verify() phải trả về False.
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import json
+
+
+def _hash(entry: dict) -> str:
+    payload = {key: value for key, value in entry.items() if key != "hash"}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def append(entry: dict, path: Path) -> dict:
-    raise NotImplementedError("BƯỚC 3d: implement ledger append")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    previous_hash = "0" * 64
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if lines:
+            if not verify(path):
+                raise ValueError("Cannot append to an invalid ledger")
+            previous_hash = json.loads(lines[-1])["hash"]
+    record = {key: value for key, value in entry.items() if key not in ("hash", "prev_hash")}
+    record["prev_hash"] = previous_hash
+    record["hash"] = _hash(record)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
 
 
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    try:
+        previous_hash = "0" * 64
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                return False
+            reason = record.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                return False
+            if record.get("prev_hash") != previous_hash or record.get("hash") != _hash(record):
+                return False
+            previous_hash = record["hash"]
+        return True
+    except (OSError, ValueError, TypeError):
+        return False

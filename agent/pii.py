@@ -30,10 +30,50 @@ set ở tests/vn_pii_testset.jsonl):
 """
 from __future__ import annotations
 
+import re
+
+
+# Bank labels disambiguate account numbers from CCCD and phone numbers.
+_BANK_ACCOUNT = re.compile(
+    r"\b(?:STK|số\s+tài\s+khoản|so\s+tai\s+khoan)\b"
+    r"\s*[:=]?\s*(?P<value>[0-9]{8,16})(?!\w)",
+    re.IGNORECASE,
+)
+_EMAIL = re.compile(
+    r"(?<![\w.+-])[A-Za-z0-9_%+-]+(?:\.[A-Za-z0-9_%+-]+)*@"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}"
+    r"(?![\w-])"
+)
+_CCCD = re.compile(r"(?<!\w)[0-9]{12}(?!\w)")
+_PHONE = re.compile(r"(?<!\w)0(?:[ -]?[0-9]){9,10}(?!\w|[ -]?[0-9])")
+
 
 def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+    """Find lab PII, with exclusive end offsets into the original text.
+
+    Explicit bank labels and emails take precedence over generic numbers.
+    Unlabelled 12-digit numbers are classified as CCCD; bank accounts need
+    an STK / số tài khoản label because their lengths overlap other types.
+    """
+    entities = []
+    patterns = (
+        ("EMAIL", _EMAIL, 0),
+        ("VN_BANK_ACCOUNT", _BANK_ACCOUNT, "value"),
+        ("VN_CCCD", _CCCD, 0),
+        ("VN_PHONE", _PHONE, 0),
+    )
+    for entity_type, pattern, group in patterns:
+        for match in pattern.finditer(text):
+            start, end = match.span(group)
+            if any(start < entity["end"] and entity["start"] < end for entity in entities):
+                continue
+            entities.append({"type": entity_type, "start": start, "end": end})
+    return sorted(entities, key=lambda entity: (entity["start"], entity["end"]))
 
 
 def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+    """Replace detected PII from right to left to preserve original offsets."""
+    for entity in reversed(detect(text)):
+        replacement = f"[REDACTED_{entity['type']}]"
+        text = text[:entity["start"]] + replacement + text[entity["end"]:]
+    return text

@@ -60,9 +60,122 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import re
+from uuid import uuid4
+
+from agent import ledger, pii, policy, tools
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
+_TICKET_NAME = re.compile(r"ticket-([0-9]+)\.md")
+
+
+def _ticket_id(filename: str) -> int | None:
+    # The split lure's companion is the only supported filename exception.
+    if filename == "ticket-904b.md":
+        return 904
+    match = _TICKET_NAME.fullmatch(filename)
+    return int(match.group(1)) if match else None
+
+
+def _authorize(*, principal_id, agent_id, run_id, expires_at, requested_tool,
+               purpose, classification, scopes, parent_scopes, depth, args, ledger_path,
+               egress_enabled=False):
+    context = policy.PolicyContext(
+        data_classification=classification,
+        request_purpose=purpose,
+        agent_owner=f"{agent_id}/{run_id}",
+        delegation_depth=depth,
+        egress_enabled=egress_enabled,
+        principal_id=principal_id,
+        requested_tool=requested_tool,
+        agent_scopes=scopes,
+        parent_scopes=parent_scopes,
+        expires_at=expires_at,
+    )
+    allow, reason = policy.check(context)
+    ledger.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "agent_id": agent_id,
+        "run_id": run_id,
+        "on_behalf_of": principal_id,
+        "expires_at": expires_at,
+        "tool": requested_tool,
+        "args_hash": hashlib.sha256(json.dumps(args, sort_keys=True).encode("utf-8")).hexdigest(),
+        "classification": classification,
+        "decision": "allow" if allow else "deny",
+        "reason": reason,
+    }, ledger_path)
+    return allow
+
+
+def _run_a(message, llm, identity, ledger_path):
+    if not _authorize(**identity, run_id=f"{identity['agent_id']}/run-a",
+                      requested_tool="search_docs", purpose="summarize-tickets",
+                      classification="internal", scopes=("search_docs",),
+                      parent_scopes=(), depth=0, args={"query": message}, ledger_path=ledger_path):
+        return [], "Không có quyền tìm ticket.", None
+    docs = tools.search_docs(message)
+    ticket_ids = sorted({ticket_id for doc in docs
+                         if (ticket_id := _ticket_id(doc["id"])) is not None})
+    injected = llm.find_injection("\n\n".join(doc["text"] for doc in docs))
+    # Only the URL leaves A for the separate send decision; never customer IDs.
+    target_url = injected.target_url if injected is not None else None
+    sanitized_docs = [{"id": doc["id"], "text": pii.redact(doc["text"])} for doc in docs]
+    return ticket_ids, llm.summarize(sanitized_docs), target_url
+
+
+def _run_b(ticket_ids: list[int], identity, ledger_path):
+    if not ticket_ids:
+        return
+    if any(type(ticket_id) is not int or ticket_id < 0 for ticket_id in ticket_ids):
+        raise ValueError("Run B accepts only non-negative integer ticket IDs")
+    run_id = f"{identity['agent_id']}/run-b"
+    scopes = ("read_customer",)
+    parent_scopes = ("search_docs", "read_customer")
+    context = policy.PolicyContext(
+        data_classification="restricted", request_purpose="support-reply",
+        agent_owner=f"{identity['agent_id']}/{run_id}", delegation_depth=1,
+        egress_enabled=False, principal_id=identity["principal_id"],
+        requested_tool="read_customer", agent_scopes=scopes,
+        parent_scopes=parent_scopes, expires_at=identity["expires_at"],
+    )
+    # Authorize before opening the private mapping, including for support_l1.
+    allow, _ = policy.check(context)
+    if not allow:
+        _authorize(**identity, run_id=run_id, requested_tool="read_customer",
+                   purpose="support-reply", classification="restricted", scopes=scopes,
+                   parent_scopes=parent_scopes, depth=1, args={"ticket_ids": ticket_ids},
+                   ledger_path=ledger_path)
+        return
+    customers = json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    selected = set(ticket_ids)
+    customer_ids = sorted({record["customer_id"] for record in customers
+                           if selected.intersection(record.get("related_tickets", []))})
+    for customer_id in customer_ids:
+        if _authorize(**identity, run_id=run_id, requested_tool="read_customer",
+                      purpose="support-reply", classification="restricted", scopes=scopes,
+                      parent_scopes=parent_scopes, depth=1, args={"customer_id": customer_id},
+                      ledger_path=ledger_path):
+            # Private records stay in Run B; they never enter the LLM or egress.
+            tools.read_customer(customer_id)
+
+
+def _check_egress(target_url: str, identity, ledger_path):
+    """Audit a proposed restricted-data send without receiving any records."""
+    allowed = _authorize(
+        **identity, run_id=f"{identity['agent_id']}/run-egress",
+        requested_tool="http_post", purpose="support-reply",
+        classification="restricted", scopes=("http_post",),
+        parent_scopes=("http_post",), depth=1, egress_enabled=True,
+        args={"url": target_url}, ledger_path=ledger_path,
+    )
+    if allowed:
+        raise RuntimeError("Policy violated the restricted + egress deny rule")
+    # No http_post on deny; this phase never receives a customer record.
 
 
 class RunnerScaffoldPending(NotImplementedError):
@@ -71,4 +184,15 @@ class RunnerScaffoldPending(NotImplementedError):
 
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    """Ticket text in A, authorized reads in B, URL-only egress denial."""
+    ledger_path = Path(log_dir) / "ledger.jsonl" if log_dir is not None else DEFAULT_LEDGER_PATH
+    identity = {
+        "principal_id": principal_id,
+        "agent_id": f"lab24-agent-{uuid4().hex}",
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+    }
+    ticket_ids, summary, target_url = _run_a(message, llm, identity, ledger_path)
+    _run_b(ticket_ids, identity, ledger_path)
+    if target_url is not None:
+        _check_egress(target_url, identity, ledger_path)
+    return summary
